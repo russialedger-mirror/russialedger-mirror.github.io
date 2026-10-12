@@ -1,0 +1,70 @@
+# A mirror of the site on GitHub Pages (docs/DISTRIBUTION.md, "Hosts"). Put this file in a
+# public repository as .github/workflows/mirror.yml, with pull.mjs at the repository root,
+# and set Settings → Pages → Source to "GitHub Actions". Every hour it fetches the signed
+# release from the main address (or, if that is blocked or down, from another mirror),
+# checks the signature against the pinned key and every file's sha256, and publishes it.
+# It needs no secret: nothing is pushed to the site's own repository, and a mirror that
+# cannot verify a release keeps serving the last good one.
+name: Mirror
+
+on:
+  schedule:
+    - cron: "41 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+env:
+  # The release signing key's public line (content/mirrors.json "public_key"); a release
+  # signed with any other key is refused.
+  RELEASE_KEY: "RWRvGOpGgdZw4fGudqOt1aLEPZdd0IxZL7jdScxLzJ4G5YnWJqAmq0Jc"
+  SOURCES: "https://russialedger.com/"
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Is there a new release?
+        id: new
+        run: |
+          # This mirror's own address: the root for a repository named <owner>.github.io, a sub-path otherwise.
+          owner=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          repo="${GITHUB_REPOSITORY#*/}"
+          if [ "$(echo "$repo" | tr '[:upper:]' '[:lower:]')" = "$owner.github.io" ]; then own="https://$owner.github.io/release.json"; else own="https://$owner.github.io/$repo/release.json"; fi
+          main="${SOURCES%% *}release.json"
+          if curl -fsS "$own" -o own.json && curl -fsS "$main" -o main.json && cmp -s own.json main.json; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Pull and check the release
+        if: steps.new.outputs.new == 'true'
+        run: |
+          from=""
+          for s in $SOURCES; do from="$from --from $s"; done
+          # Other mirrors from the last release's list, in case the main address is unreachable.
+          if curl -fsS "${SOURCES%% *}mirrors.json" -o mirrors.json; then
+            for u in $(node -e 'for (const m of require("./mirrors.json").mirrors) if (m.kind === "mirror") console.log(m.url)'); do from="$from --from $u"; done
+          fi
+          node pull.mjs --key "$RELEASE_KEY" --out site $from
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.new.outputs.new == 'true'
+        with:
+          path: site
+      - id: deploy
+        if: steps.new.outputs.new == 'true'
+        uses: actions/deploy-pages@v4
