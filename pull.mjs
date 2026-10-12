@@ -56,10 +56,29 @@ export function releaseFiles(release) {
   return release.files;
 }
 
+/**
+ * Retries for a host that says "later" (429, 5xx) or drops the connection: GitHub Pages answers 503 to some of many
+ * quick requests, more so right after a deploy. The pause doubles from firstMs; a Retry-After of up to maxMs is honoured.
+ */
+export const RETRY = { tries: 4, firstMs: 1000, maxMs: 30000 };
+const LATER = (status) => status === 429 || status >= 500;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function get(url) {
-  const r = await fetch(url, { redirect: "follow", headers: { "user-agent": "russialedger-mirror-kit/1" } });
-  if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
-  return Buffer.from(await r.arrayBuffer());
+  for (let attempt = 0; ; attempt++) {
+    let r;
+    try {
+      r = await fetch(url, { redirect: "follow", headers: { "user-agent": "russialedger-mirror-kit/1" } });
+    } catch (e) {
+      if (attempt >= RETRY.tries) throw new Error(`${url}: ${e.message}`);
+      await sleep(RETRY.firstMs * 2 ** attempt);
+      continue;
+    }
+    if (r.ok) return Buffer.from(await r.arrayBuffer());
+    if (!LATER(r.status) || attempt >= RETRY.tries) throw new Error(`${url}: HTTP ${r.status}`);
+    const after = Number(r.headers.get("retry-after")) * 1000;
+    await sleep(after > 0 && after <= RETRY.maxMs ? after : RETRY.firstMs * 2 ** attempt);
+  }
 }
 
 /** Pull one release from `base` into `out` (via a temporary folder). Returns the version. */
